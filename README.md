@@ -1,41 +1,63 @@
 # Bounty Board
 
-Multi-agent software development system. GitHub Issues as task board, local SQLite as mutex, execution agents implement tasks autonomously.
+Multi-agent software development system. GitHub Issues as task board, local SQLite as mutex, Claude Code agents implement tasks autonomously.
 
-## Architecture
+## Prerequisites
 
-```
-OpenClaw PM Agent
-│  Creates GitHub Issues, manages labels, unlocks dependencies
-↓
-GitHub Issues  ←  source of truth
-│  Labels: agent:be/fe/qa/devops + status:ready/blocked/in-progress/review
-↓
-SQLite (~/.bounty/claims.db)  ←  mutex only
-│  Atomic claim prevents two agents taking the same task
-↓
-Execution Agents (local, you activate manually)
-│  Poll every 2 min → claim → Claude Code implements → push → open PR
-↓
-QA Agent  →  reviews PR diff with Claude Code → approve / request changes
-↓
-You merge  →  GitHub auto-closes issue (Closes #N)  →  PM unlocks downstream
+| Tool | Install |
+|------|---------|
+| Python 3.10+ | `brew install python3` |
+| Git | `brew install git` |
+| [GitHub CLI](https://cli.github.com) | `brew install gh` then `gh auth login` |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` |
+| jq (optional) | `brew install jq` |
+
+```bash
+pip install -r requirements.txt
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Bootstrap labels + local state
+# 1. Clone this repo
+git clone https://github.com/liyoclaw1242/bounty-board.git
+cd bounty-board
+
+# 2. Install Python dependencies
+pip install -r requirements.txt
+
+# 3. Prepare your target repo on GitHub (the repo agents will work on)
+#    Clone it locally, e.g. ~/Projects/my-app
+
+# 4. Bootstrap — creates labels on the target repo, initializes local DB + config
 ./setup.sh owner/your-target-repo
 
-# 2. Configure
+# 5. Configure
 nano ~/.bounty/.env   # set GITHUB_TOKEN, BOUNTY_REPO, BOUNTY_REPO_DIR
 
-# 3. Create a test issue on your target repo
+# 6. Create a test issue on your target repo
 #    Labels: agent:be + status:ready
 
-# 4. Start the BE agent
+# 7. Start an agent
 python3 agents/be_agent.py
+```
+
+`setup.sh` will check all prerequisites before proceeding and tell you what's missing.
+
+## Architecture
+
+```
+GitHub Issues  ←  source of truth (labels = task state)
+│  Labels: agent:be/fe/qa/devops + status:ready/blocked/in-progress/review
+↓
+SQLite (~/.bounty/claims.db)  ←  mutex only (prevents double-claiming)
+↓
+Execution Agents (local, you activate manually)
+│  Poll every 2 min → claim → Claude Code implements → push → open PR
+↓
+QA Agent  →  reviews PR diff with Claude Code → APPROVE / REQUEST_CHANGES
+↓
+You merge  →  GitHub auto-closes issue (Closes #N)  →  PM unlocks downstream
 ```
 
 ## Label Schema
@@ -54,17 +76,10 @@ python3 agents/be_agent.py
 ## Running Agents
 
 ```bash
-# Backend agent
-python3 agents/be_agent.py
-
-# Frontend agent
-python3 agents/fe_agent.py
-
-# QA agent (reviews PRs)
-python3 agents/qa_agent.py
-
-# PM agent (unlocks blocked issues)
-python3 agents/pm_agent.py
+python3 agents/be_agent.py        # Backend agent
+python3 agents/fe_agent.py        # Frontend agent
+python3 agents/qa_agent.py        # QA agent (reviews PRs)
+python3 agents/pm_agent.py        # PM agent (unlocks blocked issues)
 ```
 
 Run multiple agents in separate terminals. They coordinate automatically via SQLite.
@@ -74,23 +89,22 @@ Override agent identity:
 AGENT_ID=be-2 python3 agents/be_agent.py
 ```
 
-## Dependencies
+## Database
 
-Use HTML comments in issue body for machine-readable dependencies:
+Schema: [`db/schema.sql`](db/schema.sql)
 
-```markdown
-## Task
-Build the checkout UI form.
+SQLite is used as an **atomic mutex**, not a state machine. A row in `claims` means an agent is working on that issue; deleting the row releases it. Claims expire after 2 hours (crash recovery).
 
-## Acceptance Criteria
-- [ ] Form validates all fields
-- [ ] Calls the `/api/checkout` endpoint (from issue #10)
-
-<!-- deps: 10 -->
+```sql
+CREATE TABLE claims (
+    issue_number INTEGER PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    claimed_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at   TEXT NOT NULL,
+    branch_name  TEXT,
+    pr_number    INTEGER
+);
 ```
-
-The `<!-- deps: 10 -->` comment is invisible in rendered markdown.  
-The PM agent polls blocked issues every 5 min and unlocks them when all deps close.
 
 ## Issue Spec Format
 
@@ -114,17 +128,24 @@ For best results, structure issues like this:
 <!-- deps: 10, 12 -->   ← only if blocked by other issues
 ```
 
+## Dependencies Between Issues
+
+Use HTML comments in issue body for machine-readable dependencies:
+
+```markdown
+<!-- deps: 10 -->
+```
+
+The comment is invisible in rendered markdown. The PM agent polls `status:blocked` issues every 5 min and flips them to `status:ready` when all deps close.
+
 ## Inspecting State
 
 ```bash
-# Active claims + rate limit
-bash scripts/query_claims.sh status
+python3 lib/claims.py status              # Active claims
 
-# Recent agent events
-bash scripts/query_claims.sh log
-
-# Errors only
-bash scripts/query_claims.sh errors
+bash scripts/query_claims.sh status       # Claims + rate limit
+bash scripts/query_claims.sh log          # Recent agent events
+bash scripts/query_claims.sh errors       # Errors only
 ```
 
 ## Environment Variables
@@ -137,15 +158,15 @@ bash scripts/query_claims.sh errors
 | `BOUNTY_DB` | — | `~/.bounty/claims.db` | SQLite path |
 | `BOUNTY_LOG` | — | `~/.bounty/agent.log` | JSONL log path |
 | `AGENT_ID` | — | `be-1` / `fe-1` etc. | Override agent identity |
-| `GITHUB_BOT_USERNAME` | — | — | GitHub username for QA bot (to skip self-reviews) |
+| `GITHUB_BOT_USERNAME` | — | — | GitHub username (for QA to skip self-reviews) |
 
 ## How PR Auto-Close Works
 
-Agents open PRs with `Closes #N` in the description.  
-When the PR is merged to `main`, GitHub automatically closes the issue.  
+Agents open PRs with `Closes #N` in the description.
+When the PR is merged to `main`, GitHub automatically closes the issue.
 The PM agent detects the closure and unlocks any dependent issues.
 
-> ⚠️  `Closes #N` only works when merging to the **default branch** (main).
+> `Closes #N` only works when merging to the **default branch** (main).
 
 ## v1 Rules
 
@@ -165,12 +186,15 @@ bounty-board/
 │   ├── qa_agent.py        # PR review agent
 │   └── pm_agent.py        # dependency unlock agent
 ├── lib/
-│   ├── claims.py          # SQLite atomic mutex
+│   ├── claims.py          # SQLite atomic mutex + CLI
 │   ├── github_client.py   # GitHub API wrapper (ETag + rate limits)
 │   ├── git_ops.py         # git operations
 │   └── logger.py          # JSONL structured logger
+├── db/
+│   └── schema.sql         # database schema
 ├── scripts/
 │   └── query_claims.sh    # inspect claims.db + agent.log
-├── setup.sh               # bootstrap script
+├── setup.sh               # bootstrap script (checks prerequisites)
+├── requirements.txt       # Python dependencies
 └── .env.example           # config template
 ```

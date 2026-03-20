@@ -156,11 +156,15 @@ if __name__ == "__main__":
     db = os.path.expanduser(os.environ.get("BOUNTY_DB", "~/.bounty/claims.db"))
     init_db(db)
 
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         print("Usage: python3 claims.py <claim|release|status> [issue_number] [agent_id]")
         sys.exit(1)
 
     action = sys.argv[1]
+
+    if action in ("claim", "release") and len(sys.argv) < 4:
+        print(f"Usage: python3 claims.py {action} <issue_number> <agent_id>")
+        sys.exit(1)
 
     if action == "claim":
         issue_num = int(sys.argv[2])
