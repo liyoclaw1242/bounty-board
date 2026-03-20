@@ -113,21 +113,13 @@ class BaseAgent:
 
     def _build_prompt(self, issue: dict) -> str:
         """Build the Claude Code prompt from an issue. Override to customize."""
-        return f"""You are a {self.agent_label.replace('agent:', '').upper()} software engineer.
-Implement the following GitHub issue exactly as described.
+        return f"""/bounty-agent
 
 ## Issue #{issue['number']}: {issue['title']}
 
 {issue.get('body') or '(no description)'}
 
-## Requirements
-- Follow existing project conventions (read the codebase first)
-- Write tests if applicable
-- Run existing tests to verify nothing breaks
-- Make sure the implementation is complete and working
-- Commit your changes with a descriptive message: "feat: {issue['title']} (closes #{issue['number']})"
-
-Do not open a PR — the agent will handle that after you commit.
+Commit when done: `git add -A && git commit -m "feat: {issue['title']} (closes #{issue['number']})"'`
 """
 
     def run(self) -> None:
