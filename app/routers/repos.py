@@ -93,17 +93,6 @@ def list_repos(request: Request):
 @router.delete("/{slug:path}", status_code=204)
 def remove_repo(slug: str, request: Request):
     state = _get_state(request)
-
-    # Stop any running workers for this repo
-    to_stop = [
-        aid for aid, w in state.workers.items()
-        if w.repo_slug == slug
-    ]
-    for aid in to_stop:
-        state.workers[aid].stop()
-        state.workers[aid].join(timeout=5)
-        del state.workers[aid]
-
     state.remove_gh(slug)
 
     if not state.db.remove_repo(slug):

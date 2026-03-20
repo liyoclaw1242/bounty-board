@@ -1,6 +1,6 @@
 """
-AppState — singleton holding DB, GitHub clients, and worker threads.
-Instantiated once in main.py lifespan, shared across all routers and workers.
+AppState — singleton holding DB and GitHub clients.
+Instantiated once in main.py lifespan, shared across all routers.
 """
 
 import sys
@@ -15,8 +15,7 @@ from lib.github_client import GitHubClient
 class AppState:
     def __init__(self, db: Database):
         self.db = db
-        self.workers: dict = {}                       # agent_id -> BaseWorker
-        self.gh_clients: dict[str, GitHubClient] = {} # repo_slug -> GitHubClient
+        self.gh_clients: dict[str, GitHubClient] = {}
 
     def get_or_create_gh(self, repo_slug: str) -> GitHubClient:
         """Get cached GitHubClient, or create from DB."""

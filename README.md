@@ -21,53 +21,76 @@ Open **http://localhost:8000/docs** for Swagger UI.
 
 ## Usage
 
-Everything is managed through the REST API:
+### 1. Register a repo
 
 ```bash
-# 1. Register a target repo
 curl -X POST http://localhost:8000/repos \
   -H "Content-Type: application/json" \
   -d '{"slug": "owner/repo", "github_token": "ghp_..."}'
+```
 
-# 2. Create a bounty (GitHub issue with labels)
+### 2. Create a bounty
+
+```bash
 curl -X POST http://localhost:8000/bounties \
   -H "Content-Type: application/json" \
   -d '{"repo_slug": "owner/repo", "title": "Add /ping endpoint", "body": "...", "agent_type": "be"}'
+```
 
-# 3. Start an agent worker
-curl -X POST http://localhost:8000/agents/start \
-  -H "Content-Type: application/json" \
-  -d '{"repo_slug": "owner/repo", "agent_type": "be"}'
+### 3. Start agents (manually)
 
-# 4. Check status
+Agents are started by humans — you decide how many to run. Each agent is a separate process that polls the API for work, claims a task, runs Claude Code, and opens a PR.
+
+```bash
+# Open a terminal and start a backend agent
+python3 agents/be_agent.py
+
+# Open another terminal for QA
+python3 agents/qa_agent.py
+
+# Scale up — run multiple agents in parallel
+AGENT_ID=be-2 python3 agents/be_agent.py
+```
+
+Agents are the **consumers** of the API, not managed by it.
+
+### 4. Check status
+
+```bash
 curl http://localhost:8000/health
-curl http://localhost:8000/agents
 curl http://localhost:8000/claims
+curl http://localhost:8000/bounties?repo_slug=owner/repo&status=ready
 ```
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────┐
-│  Bounty Board (single container)    │
-│                                     │
-│  FastAPI (:8000)                    │
-│    /docs — Swagger UI               │
-│    /repos, /bounties, /claims       │
-│    /agents — start/stop workers     │
-│                                     │
-│  Agent workers (background threads) │
-│    per repo × per agent type        │
-│                                     │
-│  SQLite (single writer, no races)   │
-└─────────────────────────────────────┘
-         │
-         ▼  GitHub REST API
-   ┌─────────────┐  ┌─────────────┐
-   │  repo-a      │  │  repo-b      │
-   │  (issues,    │  │  (issues,    │
-   │   PRs)       │  │   PRs)       │
-   └─────────────┘  └─────────────┘
+Human (you)
+│  Starts/stops agent processes manually
+│
+├──→ Agent (be_agent.py)  ──┐
+├──→ Agent (fe_agent.py)  ──┤
+├──→ Agent (qa_agent.py)  ──┤  Each agent is a separate process
+└──→ Agent (pm_agent.py)  ──┤  running Claude Code
+                            │
+                            ▼
+                 ┌──────────────────┐
+                 │  API Server      │
+                 │  FastAPI (:8000) │
+                 │  /docs (Swagger) │
+                 │                  │
+                 │  /repos          │  CRUD
+                 │  /bounties       │  CRUD
+                 │  /claims         │  Mutex
+                 │  /health         │
+                 │                  │
+                 │  SQLite          │
+                 └────────┬─────────┘
+                          │
+                          ▼  GitHub REST API
+                   ┌──────────┐  ┌──────────┐
+                   │  repo-a   │  │  repo-b   │
+                   └──────────┘  └──────────┘
 ```
 
 ## API Endpoints
@@ -76,18 +99,32 @@ curl http://localhost:8000/claims
 |--------|------|-------------|
 | `POST` | `/repos` | Register a target repo (clones + creates labels) |
 | `GET` | `/repos` | List registered repos |
-| `DELETE` | `/repos/{slug}` | Remove repo (stops its workers) |
+| `DELETE` | `/repos/{slug}` | Remove a repo |
 | `POST` | `/bounties` | Create a bounty (GitHub issue + labels) |
 | `GET` | `/bounties` | List bounties (filter by repo, status, agent_type) |
 | `GET` | `/bounties/{repo}/issues/{n}` | Get single bounty |
 | `PATCH` | `/bounties/{repo}/issues/{n}` | Update status (retry, cancel) |
-| `POST` | `/claims` | Manually claim an issue |
+| `POST` | `/claims` | Claim an issue (atomic mutex) |
 | `GET` | `/claims` | List active claims |
 | `DELETE` | `/claims/{repo}/issues/{n}` | Release a claim |
-| `POST` | `/agents/start` | Start an agent worker |
-| `POST` | `/agents/stop` | Stop an agent worker |
-| `GET` | `/agents` | List running workers |
 | `GET` | `/health` | System health check |
+
+## How Claims Work
+
+Claims prevent two agents from working on the same task:
+
+```
+Agent A: POST /claims {"repo_slug": "org/api", "issue_number": 5, "agent_id": "be-1"}
+→ 201 Created (claimed)
+
+Agent B: POST /claims {"repo_slug": "org/api", "issue_number": 5, "agent_id": "be-2"}
+→ 409 Conflict (already claimed)
+
+Agent A finishes: DELETE /claims/org/api/issues/5
+→ 204 (released, available again)
+```
+
+Claims have a TTL (default 2 hours). If an agent crashes without releasing, the claim expires automatically and another agent can pick it up.
 
 ## Agent Types
 
@@ -98,21 +135,33 @@ curl http://localhost:8000/claims
 | `qa` | `agent:qa` | QA — reviews PRs, approves or requests changes |
 | `pm` | `agent:pm` | PM — unlocks blocked issues when deps close |
 
+## Agent Lifecycle
+
+Each agent runs an infinite loop:
+
+```
+┌──→ Poll API for status:ready issues matching its label
+│    │
+│    ├── Found one → POST /claims (try to claim)
+│    │   ├── 201 → Run Claude Code → git push → open PR → DELETE /claims
+│    │   └── 409 → Someone else got it, try next
+│    │
+│    └── None found → Backoff (2 min → 10 min max)
+│
+└── Sleep → repeat
+```
+
+Agents are designed to be disposable. Kill one anytime (Ctrl+C), start more anytime. The mutex ensures no duplicate work.
+
 ## Multi-Repo Support
 
-Register multiple repos through the API. Each repo gets its own:
-- GitHub labels (created on registration)
-- Agent workers (start independently)
-- Claims (keyed by `repo_slug + issue_number`)
+Register multiple repos through the API. Claims are keyed by `(repo_slug, issue_number)` so issue numbers never collide across repos.
 
 ```bash
-# Register two repos
-curl -X POST localhost:8000/repos -d '{"slug": "org/api", "github_token": "ghp_..."}'
-curl -X POST localhost:8000/repos -d '{"slug": "org/web", "github_token": "ghp_..."}'
-
-# Start agents for each
-curl -X POST localhost:8000/agents/start -d '{"repo_slug": "org/api", "agent_type": "be"}'
-curl -X POST localhost:8000/agents/start -d '{"repo_slug": "org/web", "agent_type": "fe"}'
+curl -X POST localhost:8000/repos -H "Content-Type: application/json" \
+  -d '{"slug": "org/api", "github_token": "ghp_..."}'
+curl -X POST localhost:8000/repos -H "Content-Type: application/json" \
+  -d '{"slug": "org/web", "github_token": "ghp_..."}'
 ```
 
 ## Database
@@ -188,36 +237,24 @@ bounty-board/
 │   ├── config.py             # Settings (env vars)
 │   ├── database.py           # Thread-safe SQLite wrapper
 │   ├── models.py             # Pydantic request/response models
-│   ├── state.py              # AppState (DB, GH clients, workers)
-│   ├── routers/
-│   │   ├── repos.py          # /repos endpoints
-│   │   ├── bounties.py       # /bounties endpoints
-│   │   ├── claims.py         # /claims endpoints
-│   │   └── agents.py         # /agents endpoints
-│   └── workers/
-│       ├── base_worker.py    # Stoppable polling thread
-│       ├── be_worker.py      # Backend agent
-│       ├── fe_worker.py      # Frontend agent
-│       ├── qa_worker.py      # QA reviewer
-│       └── pm_worker.py      # Dependency unlocker
+│   ├── state.py              # AppState (DB, GH clients)
+│   └── routers/
+│       ├── repos.py          # /repos endpoints
+│       ├── bounties.py       # /bounties endpoints
+│       └── claims.py         # /claims endpoints
 ├── lib/                       # Shared libraries
 │   ├── github_client.py       # GitHub API (ETag + rate limits)
 │   ├── git_ops.py             # Git operations
 │   └── logger.py              # JSONL structured logger
-├── agents/                    # Standalone agents (legacy/CLI mode)
+├── agents/                    # Agent processes (started by humans)
+│   ├── base_agent.py          # Shared polling + claim + Claude Code
+│   ├── be_agent.py            # Backend agent
+│   ├── fe_agent.py            # Frontend agent
+│   ├── qa_agent.py            # QA review agent
+│   └── pm_agent.py            # Dependency unlock agent
 ├── db/
 │   └── schema.sql             # Database schema
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
-```
-
-## Standalone Mode (Legacy)
-
-The original standalone agents still work for single-repo setups:
-
-```bash
-./setup.sh owner/repo
-nano ~/.bounty/.env
-python3 agents/be_agent.py
 ```
