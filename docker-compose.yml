@@ -1,0 +1,22 @@
+# Docker Compose — Bounty Board
+#
+# Usage:
+#   docker compose up -d
+#   open http://localhost:8000/docs   # Swagger UI
+#
+# Register repos and start agents via the REST API.
+# All data persists on host under ~/.bounty/server/
+
+services:
+  bounty-board:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ~/.bounty/server:/data
+    environment:
+      - BOUNTY_DB=/data/bounty.db
+      - BOUNTY_LOG=/data/agent.log
+      - BOUNTY_REPOS_BASE_DIR=/data/repos
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    restart: unless-stopped

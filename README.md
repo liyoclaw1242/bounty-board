@@ -1,118 +1,150 @@
 # Bounty Board
 
-Multi-agent software development system. GitHub Issues as task board, local SQLite as mutex, Claude Code agents implement tasks autonomously.
-
-## Prerequisites
-
-| Tool | Install |
-|------|---------|
-| Python 3.10+ | `brew install python3` |
-| Git | `brew install git` |
-| [GitHub CLI](https://cli.github.com) | `brew install gh` then `gh auth login` |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` |
-| jq (optional) | `brew install jq` |
-
-```bash
-pip install -r requirements.txt
-```
+Multi-agent software development system. GitHub Issues as task board, REST API for orchestration, Claude Code agents implement tasks autonomously.
 
 ## Quick Start
 
+### Local
+
 ```bash
-# 1. Clone this repo
-git clone https://github.com/liyoclaw1242/bounty-board.git
-cd bounty-board
-
-# 2. Install Python dependencies
 pip install -r requirements.txt
-
-# 3. Prepare your target repo on GitHub (the repo agents will work on)
-#    Clone it locally, e.g. ~/Projects/my-app
-
-# 4. Bootstrap — creates labels on the target repo, initializes local DB + config
-./setup.sh owner/your-target-repo
-
-# 5. Configure
-nano ~/.bounty/.env   # set GITHUB_TOKEN, BOUNTY_REPO, BOUNTY_REPO_DIR
-
-# 6. Create a test issue on your target repo
-#    Labels: agent:be + status:ready
-
-# 7. Start an agent
-python3 agents/be_agent.py
+uvicorn app.main:app --port 8000
 ```
 
-`setup.sh` will check all prerequisites before proceeding and tell you what's missing.
+### Docker
+
+```bash
+docker compose up -d
+```
+
+Open **http://localhost:8000/docs** for Swagger UI.
+
+## Usage
+
+Everything is managed through the REST API:
+
+```bash
+# 1. Register a target repo
+curl -X POST http://localhost:8000/repos \
+  -H "Content-Type: application/json" \
+  -d '{"slug": "owner/repo", "github_token": "ghp_..."}'
+
+# 2. Create a bounty (GitHub issue with labels)
+curl -X POST http://localhost:8000/bounties \
+  -H "Content-Type: application/json" \
+  -d '{"repo_slug": "owner/repo", "title": "Add /ping endpoint", "body": "...", "agent_type": "be"}'
+
+# 3. Start an agent worker
+curl -X POST http://localhost:8000/agents/start \
+  -H "Content-Type: application/json" \
+  -d '{"repo_slug": "owner/repo", "agent_type": "be"}'
+
+# 4. Check status
+curl http://localhost:8000/health
+curl http://localhost:8000/agents
+curl http://localhost:8000/claims
+```
 
 ## Architecture
 
 ```
-GitHub Issues  ←  source of truth (labels = task state)
-│  Labels: agent:be/fe/qa/devops + status:ready/blocked/in-progress/review
-↓
-SQLite (~/.bounty/claims.db)  ←  mutex only (prevents double-claiming)
-↓
-Execution Agents (local, you activate manually)
-│  Poll every 2 min → claim → Claude Code implements → push → open PR
-↓
-QA Agent  →  reviews PR diff with Claude Code → APPROVE / REQUEST_CHANGES
-↓
-You merge  →  GitHub auto-closes issue (Closes #N)  →  PM unlocks downstream
+┌─────────────────────────────────────┐
+│  Bounty Board (single container)    │
+│                                     │
+│  FastAPI (:8000)                    │
+│    /docs — Swagger UI               │
+│    /repos, /bounties, /claims       │
+│    /agents — start/stop workers     │
+│                                     │
+│  Agent workers (background threads) │
+│    per repo × per agent type        │
+│                                     │
+│  SQLite (single writer, no races)   │
+└─────────────────────────────────────┘
+         │
+         ▼  GitHub REST API
+   ┌─────────────┐  ┌─────────────┐
+   │  repo-a      │  │  repo-b      │
+   │  (issues,    │  │  (issues,    │
+   │   PRs)       │  │   PRs)       │
+   └─────────────┘  └─────────────┘
 ```
 
-## Label Schema
+## API Endpoints
 
-| Label | Meaning |
-|-------|---------|
-| `agent:be` | Backend task |
-| `agent:fe` | Frontend task |
-| `agent:qa` | QA / testing task |
-| `agent:devops` | Infrastructure / CI task |
-| `status:ready` | Available to claim |
-| `status:blocked` | Waiting on dependencies |
-| `status:in-progress` | Agent working on it |
-| `status:review` | PR open, awaiting QA |
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/repos` | Register a target repo (clones + creates labels) |
+| `GET` | `/repos` | List registered repos |
+| `DELETE` | `/repos/{slug}` | Remove repo (stops its workers) |
+| `POST` | `/bounties` | Create a bounty (GitHub issue + labels) |
+| `GET` | `/bounties` | List bounties (filter by repo, status, agent_type) |
+| `GET` | `/bounties/{repo}/issues/{n}` | Get single bounty |
+| `PATCH` | `/bounties/{repo}/issues/{n}` | Update status (retry, cancel) |
+| `POST` | `/claims` | Manually claim an issue |
+| `GET` | `/claims` | List active claims |
+| `DELETE` | `/claims/{repo}/issues/{n}` | Release a claim |
+| `POST` | `/agents/start` | Start an agent worker |
+| `POST` | `/agents/stop` | Stop an agent worker |
+| `GET` | `/agents` | List running workers |
+| `GET` | `/health` | System health check |
 
-## Running Agents
+## Agent Types
+
+| Type | Label | Behavior |
+|------|-------|----------|
+| `be` | `agent:be` | Backend — implements task, pushes branch, opens PR |
+| `fe` | `agent:fe` | Frontend — same as BE with React/TS-focused prompt |
+| `qa` | `agent:qa` | QA — reviews PRs, approves or requests changes |
+| `pm` | `agent:pm` | PM — unlocks blocked issues when deps close |
+
+## Multi-Repo Support
+
+Register multiple repos through the API. Each repo gets its own:
+- GitHub labels (created on registration)
+- Agent workers (start independently)
+- Claims (keyed by `repo_slug + issue_number`)
 
 ```bash
-python3 agents/be_agent.py        # Backend agent
-python3 agents/fe_agent.py        # Frontend agent
-python3 agents/qa_agent.py        # QA agent (reviews PRs)
-python3 agents/pm_agent.py        # PM agent (unlocks blocked issues)
-```
+# Register two repos
+curl -X POST localhost:8000/repos -d '{"slug": "org/api", "github_token": "ghp_..."}'
+curl -X POST localhost:8000/repos -d '{"slug": "org/web", "github_token": "ghp_..."}'
 
-Run multiple agents in separate terminals. They coordinate automatically via SQLite.
-
-Override agent identity:
-```bash
-AGENT_ID=be-2 python3 agents/be_agent.py
+# Start agents for each
+curl -X POST localhost:8000/agents/start -d '{"repo_slug": "org/api", "agent_type": "be"}'
+curl -X POST localhost:8000/agents/start -d '{"repo_slug": "org/web", "agent_type": "fe"}'
 ```
 
 ## Database
 
 Schema: [`db/schema.sql`](db/schema.sql)
 
-SQLite is used as an **atomic mutex**, not a state machine. A row in `claims` means an agent is working on that issue; deleting the row releases it. Claims expire after 2 hours (crash recovery).
-
 ```sql
+CREATE TABLE repos (
+    slug          TEXT PRIMARY KEY,   -- "owner/repo"
+    github_token  TEXT NOT NULL,
+    repo_dir      TEXT NOT NULL,
+    bot_username  TEXT DEFAULT '',
+    created_at    TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE claims (
-    issue_number INTEGER PRIMARY KEY,
-    agent_id     TEXT NOT NULL,
-    claimed_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at   TEXT NOT NULL,
+    repo_slug    TEXT    NOT NULL,
+    issue_number INTEGER NOT NULL,
+    agent_id     TEXT    NOT NULL,
+    claimed_at   TEXT    DEFAULT (datetime('now')),
+    expires_at   TEXT    NOT NULL,
     branch_name  TEXT,
-    pr_number    INTEGER
+    pr_number    INTEGER,
+    PRIMARY KEY (repo_slug, issue_number)
 );
 ```
 
 ## Issue Spec Format
 
-For best results, structure issues like this:
-
 ```markdown
 ## Task
-[One-sentence description of what to build]
+[What to build]
 
 ## Acceptance Criteria
 - [ ] Criterion 1
@@ -120,81 +152,72 @@ For best results, structure issues like this:
 
 ## Files Likely Affected
 - src/api/foo.ts
-- tests/api/foo.test.ts
 
-## Context
-[Any relevant background, API contracts, or links]
-
-<!-- deps: 10, 12 -->   ← only if blocked by other issues
+<!-- deps: 10, 12 -->   ← blocks until #10 and #12 close
 ```
 
-## Dependencies Between Issues
+## Label Schema
 
-Use HTML comments in issue body for machine-readable dependencies:
+| Label | Meaning |
+|-------|---------|
+| `agent:be` / `fe` / `qa` / `devops` | Task assignment |
+| `status:ready` | Available to claim |
+| `status:blocked` | Waiting on dependencies |
+| `status:in-progress` | Agent working |
+| `status:review` | PR open, awaiting QA |
 
-```markdown
-<!-- deps: 10 -->
+## Docker Data
+
+All persistent state is bind-mounted to the host:
+
 ```
-
-The comment is invisible in rendered markdown. The PM agent polls `status:blocked` issues every 5 min and flips them to `status:ready` when all deps close.
-
-## Inspecting State
-
-```bash
-python3 lib/claims.py status              # Active claims
-
-bash scripts/query_claims.sh status       # Claims + rate limit
-bash scripts/query_claims.sh log          # Recent agent events
-bash scripts/query_claims.sh errors       # Errors only
+~/.bounty/server/
+├── bounty.db         # SQLite database
+├── agent.log         # JSONL event log
+└── repos/            # Cloned target repos
+    ├── owner/repo-a/
+    └── owner/repo-b/
 ```
-
-## Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `GITHUB_TOKEN` | ✓ | — | Fine-grained PAT (Issues + PRs + Contents on target repo) |
-| `BOUNTY_REPO` | ✓ | — | `owner/repo` to work on |
-| `BOUNTY_REPO_DIR` | ✓ | — | Local path to the target repo |
-| `BOUNTY_DB` | — | `~/.bounty/claims.db` | SQLite path |
-| `BOUNTY_LOG` | — | `~/.bounty/agent.log` | JSONL log path |
-| `AGENT_ID` | — | `be-1` / `fe-1` etc. | Override agent identity |
-| `GITHUB_BOT_USERNAME` | — | — | GitHub username (for QA to skip self-reviews) |
-
-## How PR Auto-Close Works
-
-Agents open PRs with `Closes #N` in the description.
-When the PR is merged to `main`, GitHub automatically closes the issue.
-The PM agent detects the closure and unlocks any dependent issues.
-
-> `Closes #N` only works when merging to the **default branch** (main).
-
-## v1 Rules
-
-- **Human merges all PRs** — QA agent approves, you click merge
-- **One token** — all agents share one fine-grained PAT
-- **Single machine** — SQLite mutex requires all agents on same host
-- **No auto-merge** — add this in v2 after the system proves reliable
 
 ## File Structure
 
 ```
 bounty-board/
-├── agents/
-│   ├── base_agent.py      # shared polling + claim + Claude Code logic
-│   ├── be_agent.py        # backend agent
-│   ├── fe_agent.py        # frontend agent
-│   ├── qa_agent.py        # PR review agent
-│   └── pm_agent.py        # dependency unlock agent
-├── lib/
-│   ├── claims.py          # SQLite atomic mutex + CLI
-│   ├── github_client.py   # GitHub API wrapper (ETag + rate limits)
-│   ├── git_ops.py         # git operations
-│   └── logger.py          # JSONL structured logger
+├── app/
+│   ├── main.py              # FastAPI app + lifespan
+│   ├── config.py             # Settings (env vars)
+│   ├── database.py           # Thread-safe SQLite wrapper
+│   ├── models.py             # Pydantic request/response models
+│   ├── state.py              # AppState (DB, GH clients, workers)
+│   ├── routers/
+│   │   ├── repos.py          # /repos endpoints
+│   │   ├── bounties.py       # /bounties endpoints
+│   │   ├── claims.py         # /claims endpoints
+│   │   └── agents.py         # /agents endpoints
+│   └── workers/
+│       ├── base_worker.py    # Stoppable polling thread
+│       ├── be_worker.py      # Backend agent
+│       ├── fe_worker.py      # Frontend agent
+│       ├── qa_worker.py      # QA reviewer
+│       └── pm_worker.py      # Dependency unlocker
+├── lib/                       # Shared libraries
+│   ├── github_client.py       # GitHub API (ETag + rate limits)
+│   ├── git_ops.py             # Git operations
+│   └── logger.py              # JSONL structured logger
+├── agents/                    # Standalone agents (legacy/CLI mode)
 ├── db/
-│   └── schema.sql         # database schema
-├── scripts/
-│   └── query_claims.sh    # inspect claims.db + agent.log
-├── setup.sh               # bootstrap script (checks prerequisites)
-├── requirements.txt       # Python dependencies
-└── .env.example           # config template
+│   └── schema.sql             # Database schema
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
+```
+
+## Standalone Mode (Legacy)
+
+The original standalone agents still work for single-repo setups:
+
+```bash
+./setup.sh owner/repo
+nano ~/.bounty/.env
+python3 agents/be_agent.py
 ```
