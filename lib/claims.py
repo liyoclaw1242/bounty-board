@@ -146,3 +146,45 @@ def update_claim_pr(db_path: str, issue_number: int, pr_number: int) -> None:
             )
     finally:
         conn.close()
+
+
+# ── CLI entrypoint (used by /create-agent-employ command) ───────────────────
+
+if __name__ == "__main__":
+    import sys
+
+    db = os.path.expanduser(os.environ.get("BOUNTY_DB", "~/.bounty/claims.db"))
+    init_db(db)
+
+    if len(sys.argv) < 3:
+        print("Usage: python3 claims.py <claim|release|status> [issue_number] [agent_id]")
+        sys.exit(1)
+
+    action = sys.argv[1]
+
+    if action == "claim":
+        issue_num = int(sys.argv[2])
+        agent_id = sys.argv[3]
+        result = try_claim(db, issue_num, agent_id)
+        print("1" if result else "0")
+        sys.exit(0 if result else 1)
+
+    elif action == "release":
+        issue_num = int(sys.argv[2])
+        agent_id = sys.argv[3]
+        release_claim(db, issue_num, agent_id)
+        print("released")
+
+    elif action == "status":
+        rows = list_claims(db)
+        if not rows:
+            print("No active claims.")
+        else:
+            print(f"{'ISSUE':>6}  {'AGENT':<30}  {'EXPIRES':>19}  {'STATE'}")
+            print("-" * 72)
+            for r in rows:
+                state = "⚠️  EXPIRED" if r["expired"] else "✓ active"
+                print(f"{r['issue_number']:>6}  {r['agent_id']:<30}  {r['expires_at']:>19}  {state}")
+    else:
+        print(f"Unknown action: {action}")
+        sys.exit(1)
