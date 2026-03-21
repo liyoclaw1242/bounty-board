@@ -29,6 +29,16 @@ curl -X POST http://localhost:8000/repos \
   -d '{"slug": "owner/repo", "github_token": "ghp_..."}'
 ```
 
+When the API server runs inside Docker, the auto-assigned `repo_dir` is a container-internal path (e.g. `/data/repos/owner/repo`). If your agents run on the **host**, pass `local_dir` so they know where the clone lives on the host filesystem:
+
+```bash
+curl -X POST http://localhost:8000/repos \
+  -H "Content-Type: application/json" \
+  -d '{"slug": "owner/repo", "github_token": "ghp_...", "local_dir": "~/Projects/repo"}'
+```
+
+The `GET /repos` response includes both `repo_dir` (server-side) and `local_dir` (host-side). Agents should prefer `local_dir` when available.
+
 ### 2. Create a bounty
 
 ```bash
@@ -172,7 +182,8 @@ Schema: [`db/schema.sql`](db/schema.sql)
 CREATE TABLE repos (
     slug          TEXT PRIMARY KEY,   -- "owner/repo"
     github_token  TEXT NOT NULL,
-    repo_dir      TEXT NOT NULL,
+    repo_dir      TEXT NOT NULL,      -- server-side path
+    local_dir     TEXT,               -- host-side path (for agents outside container)
     bot_username  TEXT DEFAULT '',
     created_at    TEXT DEFAULT (datetime('now'))
 );

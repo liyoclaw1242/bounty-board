@@ -7,6 +7,7 @@ class RepoCreate(BaseModel):
     slug: str                        # "owner/repo"
     github_token: str
     repo_dir: str | None = None      # auto-assigned if omitted
+    local_dir: str | None = None     # host-side path for agents outside container
     bot_username: str = ""
 
 class BountyCreate(BaseModel):
@@ -31,6 +32,7 @@ class ClaimCreate(BaseModel):
 class RepoOut(BaseModel):
     slug: str
     repo_dir: str
+    local_dir: str | None = None     # host-side path; falls back to repo_dir if unset
     bot_username: str
     created_at: str
 

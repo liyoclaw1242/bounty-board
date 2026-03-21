@@ -30,6 +30,7 @@ class Database:
                     slug          TEXT PRIMARY KEY,
                     github_token  TEXT NOT NULL,
                     repo_dir      TEXT NOT NULL,
+                    local_dir     TEXT,
                     bot_username  TEXT DEFAULT '',
                     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
                 );
@@ -48,18 +49,25 @@ class Database:
             """)
         self._conn.commit()
 
+        # Migrate: add local_dir column if missing (existing DBs)
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(repos)").fetchall()]
+        if "local_dir" not in cols:
+            self._conn.execute("ALTER TABLE repos ADD COLUMN local_dir TEXT")
+            self._conn.commit()
+
     def close(self):
         self._conn.close()
 
     # ── Repos ─────────────────────────────────────────────────────────────────
 
     def add_repo(self, slug: str, github_token: str, repo_dir: str,
-                 bot_username: str = "") -> dict:
+                 bot_username: str = "", local_dir: str | None = None) -> dict:
         with self._lock:
             self._conn.execute(
-                """INSERT OR REPLACE INTO repos (slug, github_token, repo_dir, bot_username)
-                   VALUES (?, ?, ?, ?)""",
-                (slug, github_token, repo_dir, bot_username),
+                """INSERT OR REPLACE INTO repos
+                   (slug, github_token, repo_dir, local_dir, bot_username)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (slug, github_token, repo_dir, local_dir, bot_username),
             )
             self._conn.commit()
         return self.get_repo(slug)
