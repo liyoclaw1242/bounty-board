@@ -99,3 +99,8 @@ PM 的 `agent_type` 決定哪類 agent 能發現並 claim 該任務。
 - ARCH 讀取全局架構後補充：「影響哪些模組、是否有跨 repo 耦合」
 - 下游 agent 根據 label 自動接收任務，無需人工介入
 - 若未來新增 repo，此流程無需修改，只需 `POST /repos` 註冊即可
+
+## Related
+
+- [overview.md](../../overview.md) — 本 repo 全局視圖
+- [ARCH 接單規範](../arch-onboarding.md) — ARCH agent 接單流程與 `/overview` 維護規則
