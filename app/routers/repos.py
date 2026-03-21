@@ -32,7 +32,7 @@ def _init_repo(slug: str, token: str, repo_dir: str):
     # Create labels
     env = os.environ.copy()
     env["GH_TOKEN"] = token
-    for agent in ["be", "fe", "qa", "devops"]:
+    for agent in ["be", "fe", "qa", "devops", "arch", "design", "debug", "pm"]:
         subprocess.run(
             ["gh", "label", "create", f"agent:{agent}",
              "--repo", slug, "--color", "0E8A16",
@@ -63,13 +63,15 @@ def register_repo(body: RepoCreate, request: Request,
         settings.repos_base_dir, body.slug.replace("/", "/")
     )
 
-    state.db.add_repo(body.slug, body.github_token, repo_dir, body.bot_username)
+    state.db.add_repo(body.slug, body.github_token, repo_dir,
+                      body.bot_username, body.local_dir)
     background_tasks.add_task(_init_repo, body.slug, body.github_token, repo_dir)
 
     repo = state.db.get_repo(body.slug)
     return RepoOut(
         slug=repo["slug"],
         repo_dir=repo["repo_dir"],
+        local_dir=repo["local_dir"],
         bot_username=repo["bot_username"],
         created_at=repo["created_at"],
     )
@@ -83,6 +85,7 @@ def list_repos(request: Request):
         RepoOut(
             slug=r["slug"],
             repo_dir=r["repo_dir"],
+            local_dir=r["local_dir"],
             bot_username=r["bot_username"],
             created_at=r["created_at"],
         )

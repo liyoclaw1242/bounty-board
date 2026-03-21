@@ -9,7 +9,8 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS repos (
     slug          TEXT PRIMARY KEY,       -- "owner/repo"
     github_token  TEXT NOT NULL,
-    repo_dir      TEXT NOT NULL,          -- local path to cloned repo
+    repo_dir      TEXT NOT NULL,          -- server-side path to cloned repo
+    local_dir     TEXT,                    -- host-side path (for agents running outside container)
     bot_username  TEXT DEFAULT '',
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
